@@ -521,6 +521,7 @@ export type Admin = {
     resolveOffsets?: boolean
   }): Promise<Array<{ topic: string; partitions: FetchOffsetsPartition[] }>>
   fetchTopicOffsets(topic: string): Promise<Array<SeekEntry & { high: string; low: string }>>
+  fetchMultipleTopicOffsets<TopicsType extends string[]>(...topics: TopicsType): Promise<Record<TopicsType[number], Array<SeekEntry & { high: string; low: string }>>>
   fetchTopicOffsetsByTimestamp(topic: string, timestamp?: number): Promise<Array<SeekEntry>>
   describeCluster(): Promise<{
     brokers: Array<{ nodeId: number; host: string; port: number }>

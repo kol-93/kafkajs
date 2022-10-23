@@ -292,6 +292,8 @@ module.exports = ({
   }
 
   /**
+   * Fetches low and high offsets for the topic
+   *
    * @param {string} topic
    */
 
@@ -308,24 +310,25 @@ module.exports = ({
         await cluster.refreshMetadataIfNecessary()
 
         const metadata = cluster.findTopicPartitionMetadata(topic)
-        const high = await cluster.fetchTopicsOffset([
-          {
-            topic,
-            fromBeginning: false,
-            partitions: metadata.map(p => ({ partition: p.partitionId })),
-          },
+        const [high, low] = await Promise.all([
+          cluster.fetchTopicsOffset([
+            {
+              topic,
+              fromBeginning: false,
+              partitions: metadata.map(p => ({ partition: p.partitionId })),
+            },
+          ]),
+          cluster.fetchTopicsOffset([
+            {
+              topic,
+              fromBeginning: true,
+              partitions: metadata.map(p => ({ partition: p.partitionId })),
+            },
+          ]),
         ])
 
-        const low = await cluster.fetchTopicsOffset([
-          {
-            topic,
-            fromBeginning: true,
-            partitions: metadata.map(p => ({ partition: p.partitionId })),
-          },
-        ])
-
-        const { partitions: highPartitions } = high.pop()
-        const { partitions: lowPartitions } = low.pop()
+        const { partitions: highPartitions } = high[0]
+        const { partitions: lowPartitions } = low[0]
         return highPartitions.map(({ partition, offset }) => ({
           partition,
           offset,
@@ -333,6 +336,76 @@ module.exports = ({
           low: lowPartitions.find(({ partition: lowPartition }) => lowPartition === partition)
             .offset,
         }))
+      } catch (e) {
+        if (e.type === 'UNKNOWN_TOPIC_OR_PARTITION') {
+          await cluster.refreshMetadata()
+          throw e
+        }
+
+        bail(e)
+      }
+    })
+  }
+
+  /**
+   * Fetches low and high offsets for multiple topics
+   *
+   * @param {string} topics
+   */
+
+  const fetchMultipleTopicOffsets = async (...topics) => {
+    if (!Array.isArray(topics) || topics.some(topic => !topic || typeof topic !== 'string')) {
+      throw new KafkaJSNonRetriableError(`Invalid topic ${topics}`)
+    }
+
+    const retrier = createRetry(retry)
+    const uniqueTopics = Array.from(new Set(topics))
+
+    return retrier(async (bail, retryCount, retryTime) => {
+      try {
+        await cluster.addMultipleTargetTopics(uniqueTopics)
+        await cluster.refreshMetadataIfNecessary()
+        const partitions = uniqueTopics.map(topic =>
+          cluster.findTopicPartitionMetadata(topic).map(p => ({ partition: p.partitionId }))
+        )
+
+        const [high, low] = await Promise.all([
+          cluster.fetchTopicsOffset(
+            uniqueTopics.map((topic, idx) => ({
+              topic,
+              fromBeginning: false,
+              partitions: partitions[idx],
+            }))
+          ),
+          cluster.fetchTopicsOffset(
+            uniqueTopics.map((topic, idx) => ({
+              topic,
+              fromBeginning: true,
+              partitions: partitions[idx],
+            }))
+          ),
+        ])
+        const reducedHigh = high.reduce((acc, offsets) => {
+          acc[offsets.topic] = offsets.partitions
+          return acc
+        }, {})
+        const reducedLow = low.reduce((acc, offsets) => {
+          acc[offsets.topic] = offsets.partitions
+          return acc
+        }, {})
+
+        return uniqueTopics.reduce((acc, topic) => {
+          const highPartitions = reducedHigh[topic] || []
+          const lowPartitions = reducedLow[topic] || []
+          acc[topic] = highPartitions.map(({ partition, offset }) => ({
+            partition,
+            offset,
+            high: offset,
+            low: lowPartitions.find(({ partition: lowPartition }) => lowPartition === partition)
+              .offset,
+          }))
+          return acc
+        }, {})
       } catch (e) {
         if (e.type === 'UNKNOWN_TOPIC_OR_PARTITION') {
           await cluster.refreshMetadata()
@@ -1586,6 +1659,7 @@ module.exports = ({
     events,
     fetchOffsets,
     fetchTopicOffsets,
+    fetchMultipleTopicOffsets,
     fetchTopicOffsetsByTimestamp,
     setOffsets,
     resetOffsets,
